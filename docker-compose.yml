@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  # Temporal server
+  temporal:
+    image: temporalio/auto-setup:latest
+    ports:
+      - "7233:7233"
+      - "8080:8080"  # Temporal Web UI
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgres
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./temporal:/etc/temporal/config/dynamicconfig
+    networks:
+      - temporal-network
+
+  # PostgreSQL database
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - temporal-network
+
+  # Application database (separate from Temporal)
+  app-postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: app_user
+      POSTGRES_PASSWORD: app_password
+      POSTGRES_DB: orders
+    ports:
+      - "5433:5432"
+    volumes:
+      - app_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app_user -d orders"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - temporal-network
+
+  # Temporal worker
+  worker:
+    build: .
+    command: python scripts/worker.py
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - DATABASE_URL=postgresql://app_user:app_password@app-postgres:5432/orders
+    depends_on:
+      temporal:
+        condition: service_started
+      app-postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    working_dir: /app
+    networks:
+      - temporal-network
+    restart: on-failure
+
+volumes:
+  postgres_data:
+  app_postgres_data:
+
+networks:
+  temporal-network:
+    driver: bridge
